@@ -7,11 +7,10 @@
 ##############################################
 
 terraform {
-  backend "s3" {
-    bucket = "my-bucket-2000-0903-0909"
-    key    = "global/s3/terraform.tfstate"
-    region = "us-east-2"
-    dynamodb_table = "myDynamodbTable"
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
   }
 }
 
@@ -38,11 +37,22 @@ data "aws_subnets" "default" {
 # 2) TG, SG, Launch Template, ASG TG
 
 ## Target Group
-resource "aws_lb_target_group" "myalb_tg" {
-  name     = "myalb-tg"
+## TG (Target Group)
+resource "aws_lb_target_group" "myalb-tg" {
+  name     = "tf-example-lb-tg"
   port     = 8080
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path = "/"
+    protocol = "HTTP"
+    matcher = "200"
+    interval = 15
+    timeout = 3 
+    healthy_threshold = 2
+    unhealthy_threshold = 2
+  }
 }
 
 ## Security Group
@@ -56,7 +66,7 @@ resource "aws_security_group" "allow_8080" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "allow_8080_ipv4" {
+resource "aws_vpc_security_group_ingress_rule" "allow_8080_ingress_ipv4" {
   security_group_id = aws_security_group.allow_8080.id
   cidr_ipv4         = "0.0.0.0/0"
   from_port         = 8080
@@ -64,7 +74,7 @@ resource "aws_vpc_security_group_ingress_rule" "allow_8080_ipv4" {
   ip_protocol       = "tcp"
 }
 
-resource "aws_vpc_security_group_egress_rule" "allow_all_traffic_ipv4" {
+resource "aws_vpc_security_group_egress_rule" "allow_8080_egress_ipv4" {
   security_group_id = aws_security_group.allow_8080.id
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
@@ -81,8 +91,8 @@ data "terraform_remote_state" "myRemoteState" {
 }
 
 ## Launch Template
-resource "aws_launch_template" "myLT" {
-  name = "myLT"
+resource "aws_launch_template" "myTemplate" {
+  name = "myTemplate"
   image_id = "ami-0cfde0ea8edd312d4" # ubuntu
   instance_type = "t3.micro"
   vpc_security_group_ids = [aws_security_group.allow_8080.id]
@@ -92,41 +102,64 @@ resource "aws_launch_template" "myLT" {
     db_port = data.terraform_remote_state.myRemoteState.outputs.db_port
     server_port = 8080
   }))
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 ## ASG (Auto Scaling Group)
 resource "aws_autoscaling_group" "myASG" {
   vpc_zone_identifier = data.aws_subnets.default.ids
-  target_group_arns = [aws_lb_target_group.myalb_tg.arn]
+
+  depends_on = [aws_lb_target_group.myalb-tg]
+  target_group_arns = [aws_lb_target_group.myalb-tg.arn]
+  
   desired_capacity   = 2
   max_size           = 10
   min_size           = 2
 
   launch_template {
-    id      = aws_launch_template.myLT.id
+    id      = aws_launch_template.myTemplate.id
     version = "$Latest"
   }
 }
 
-## TG (Target Group)
-resource "aws_lb_target_group" "myalb-tg" {
-  name     = "tf-example-lb-tg"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
+# 3) ALB, ALB Listener, ALB Listener Rules
+
+## ALB Security Group 
+resource "aws_security_group" "myalbSG" {
+  name = "myalb-SG" 
+  description = "Allow 80 inbound traffic and all outbound traffic"
+  vpc_id      = data.aws_vpc.default.id
+
+  tags = {
+    Name = "allow_80"
+  }
 }
 
-# 3) ALB, ALB Listener, ALB Listener Rules
+resource "aws_vpc_security_group_ingress_rule" "allow_80_ingress_ipv4" {
+  security_group_id = aws_security_group.myalbSG.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "allow_80_egress_ipv4" {
+  security_group_id = aws_security_group.myalbSG.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
 
 ## ALB (Application Load Balancer) 
 resource "aws_lb" "myalb" {
   name               = "myalb"
-  internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.allow_8080.id]
+  security_groups    = [aws_security_group.myalbSG.id]
   subnets            = data.aws_subnets.default.ids
 
-  enable_deletion_protection = true
+  enable_deletion_protection = false # for test
 
   tags = {
     Environment = "production"
@@ -136,7 +169,7 @@ resource "aws_lb" "myalb" {
 ## ALB Listener
 resource "aws_lb_listener" "myalb-listener" {
   load_balancer_arn = aws_lb.myalb.arn
-  port              = "8080"
+  port              = "80"
   protocol          = "HTTP"
 
   default_action {
