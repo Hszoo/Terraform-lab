@@ -1,16 +1,26 @@
 terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+      version = "6.17.0"
+    }
+  }
+
   backend "s3" {
     bucket = "mybucket-2000-0903"
     key = "global/s3/terraform.tfstate"
     region = "us-east-2"
     dynamodb_table = "terraform-locks"
+    encrypt = true
   }
 }
 
-provider "aws" {
+## provider 
+provider "aws" { 
   # Configuration options
   region = "us-east-2"
 }
+
 
 data "aws_ami" "ubuntu2204ami" {
   most_recent = true
